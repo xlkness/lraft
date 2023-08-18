@@ -79,7 +79,34 @@ func (mgr *logManager) lastIndex() uint64 {
 }
 
 func (mgr *logManager) entriesSlice(low, high uint64) []message.Entry {
-	mgr.stableStorage.LastIndex()
+	stableLastIndex, err := mgr.stableStorage.LastIndex()
+	if err != nil {
+		panic(err)
+	}
+
+	entries := make([]message.Entry, 0)
+	if low <= stableLastIndex {
+		appliedEntries, snapshot, err := mgr.stableStorage.Entries(low, min(stableLastIndex, high))
+		if err != nil {
+			panic(err)
+		}
+
+		if snapshot != nil {
+
+		} else {
+			entries = append(entries, appliedEntries...)
+		}
+	}
+
+	if len(mgr.unstableEntries) == 0 {
+		return entries
+	}
+
+	if high >= mgr.unstableEntries[0].Index {
+		entries = append(entries, mgr.unstableEntries[0:int(min(uint64(len(mgr.unstableEntries)), high))]...)
+	}
+
+	return entries
 }
 
 func (mgr *logManager) findTerm(index uint64) uint64 {
