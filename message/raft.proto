@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+option go_package = "../message";
+
+// protoc -I./ --go_out=./ ./*.proto
+
+enum MessageID {
+  MsgNone = 0;
+  MsgAppendEntriesReq   = 1;
+  MsgAppendEntriesRes   = 2;
+  MsgRequestPreVoteReq  = 3;
+  MsgRequestPreVoteRes  = 4;
+  MsgRequestVoteReq     = 5;
+  MsgRequestVoteRes     = 6;
+}
+
+message Entry {
+  uint64 Term = 1;
+  uint64 Index = 2;
+  int32 EntryType = 3;
+  bytes Data = 4;
+}
+
+message StorageState {
+  uint64 Term = 1;
+  int64 Vote = 2;
+  uint64 LastAppliedIndex = 3;
+}
+
+message Snapshot {
+  uint64 Index = 1;
+  uint64 Term = 2;
+  bytes Data = 3;
+}
+
+message StorageConfig {
+  repeated int64 Peers = 1;
+}
+
+message AppendEntriesReq {
+  uint64 Term = 1;               // leader的任期
+  int64 LeaderID = 2;           // follower可以通过这个id重定向到leader
+  uint64 PrevLogIndex = 3;       // 当前最大的日志条目索引
+  uint64 PrevLogTerm = 4;        // PrevLogIndex所处的任期
+  repeated Entry Entries = 5;   // 存储的日志条目
+}
+message AppendEntriesRes {
+  uint64 Term = 1;               // 当前任期，用来让leader更新自己
+  int64 From = 2;
+  bool Success = 3;             //
+}
+
+message RequestVoteReq {
+  uint64 Term = 1;
+  int64 CandidateID = 2;
+  uint64 LastLogIndex = 3;
+  uint64 LastLogTerm = 4;
+}
+message RequestVoteRes {
+  uint64 Term = 1;
+  int64 FromID = 2;
+  bool VoteGranted = 3;
+}
