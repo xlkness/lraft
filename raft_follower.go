@@ -30,6 +30,44 @@ func (rf *raftFollower) handleEvent(msgID message.MessageID, payload proto.Messa
 		rf.resetCanElectionTimer()
 
 		// 追加日志
+		request := payload.(*message.AppendEntriesReq)
+
+		reject := false
+		if request.Term < rf.term.term {
+			reject = true
+		} else if rf.entries.FindTerm(request.PrevLogIndex) != request.PrevLogTerm {
+			reject = true
+		}
+
+		if reject {
+			r.send(request.LeaderID, message.MessageID_MsgAppendEntriesRes, &message.AppendEntriesRes{
+				Success: reject,
+			})
+			return
+		}
+
+		if len(request.Entries) == 0 {
+			// 比对leader的应用索引，将进度追平
+			rf.entries.ApplyToIndex(r.state(), request.LeaderAppliedIndex)
+		} else {
+			// 追加条目
+			rf.entries.FollowerAppendEntries(request.PrevLogTerm, request.PrevLogIndex, request.Entries)
+		}
+		r.send(request.LeaderID, message.MessageID_MsgAppendEntriesRes, &message.AppendEntriesRes{
+			Success: true,
+		})
+	case message.MessageID_MsgRequestPreVoteReq, message.MessageID_MsgRequestVoteReq:
+		rf.resetCanElectionTimer()
+
+		request := payload.(*message.RequestVoteReq)
+		if rf.votedFor != None && rf.votedFor != request.CandidateID {
+			r.send(request.CandidateID, message.MessageID_MsgRequestPreVoteRes, &message.RequestVoteRes{VoteGranted: false})
+		} else if !rf.entries.IsUpToDate(request.LastLogIndex, request.LastLogTerm) {
+			r.send(request.CandidateID, message.MessageID_MsgRequestPreVoteRes, &message.RequestVoteRes{VoteGranted: false})
+		} else {
+			r.votedFor = request.CandidateID
+			r.send(request.CandidateID, message.MessageID_MsgRequestPreVoteRes, &message.RequestVoteRes{VoteGranted: true})
+		}
 	}
 }
 

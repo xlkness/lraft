@@ -1,7 +1,6 @@
 package lraft
 
 import (
-	"lraft/message"
 	"sort"
 )
 
@@ -48,111 +47,4 @@ func (psr peersRecord) calcQuorumLogProgress() uint64 {
 		return progressList[i] > progressList[j]
 	})
 	return progressList[len(psr)/2]
-}
-
-type logManager struct {
-	stableStorage   Storage
-	unstableEntries []message.Entry
-}
-
-func (mgr *logManager) applyToIndex(state *message.StorageState, index uint64) {
-	err := mgr.stableStorage.ApplyTo(state, index)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func (mgr *logManager) firstIndex() uint64 {
-	return 0
-}
-
-func (mgr *logManager) lastIndex() uint64 {
-	if len(mgr.unstableEntries) == 0 {
-		lastIndex, err := mgr.stableStorage.LastIndex()
-		if err != nil {
-			panic(err)
-		}
-
-		return lastIndex
-	}
-	return mgr.unstableEntries[len(mgr.unstableEntries)-1].Index
-}
-
-func (mgr *logManager) entriesSlice(low, high uint64) []message.Entry {
-	stableLastIndex, err := mgr.stableStorage.LastIndex()
-	if err != nil {
-		panic(err)
-	}
-
-	entries := make([]message.Entry, 0)
-	if low <= stableLastIndex {
-		appliedEntries, snapshot, err := mgr.stableStorage.Entries(low, min(stableLastIndex, high))
-		if err != nil {
-			panic(err)
-		}
-
-		if snapshot != nil {
-
-		} else {
-			entries = append(entries, appliedEntries...)
-		}
-	}
-
-	if len(mgr.unstableEntries) == 0 {
-		return entries
-	}
-
-	if high >= mgr.unstableEntries[0].Index {
-		entries = append(entries, mgr.unstableEntries[0:int(min(uint64(len(mgr.unstableEntries)), high))]...)
-	}
-
-	return entries
-}
-
-func (mgr *logManager) findTerm(index uint64) uint64 {
-	for _, e := range mgr.unstableEntries {
-		if e.Index == index {
-			return e.Term
-		}
-	}
-
-	term, find, err := mgr.stableStorage.Term(index)
-	if err != nil {
-		panic(err)
-	}
-
-	if !find {
-		return -1
-	}
-
-	return term
-}
-
-func (mgr *logManager) appendEntries(entries []message.Entry) {
-	if len(entries) == 0 {
-		return
-	}
-
-	lastAppliedIndex, err := mgr.stableStorage.LastIndex()
-	if err != nil {
-		panic(err)
-	}
-
-	applyFirstIndex := entries[0].Index
-	assert(applyFirstIndex-1 < lastAppliedIndex, false)
-
-	if len(mgr.unstableEntries) == 0 {
-		mgr.unstableEntries = append(mgr.unstableEntries, entries...)
-		return
-	}
-
-	switch {
-	case applyFirstIndex == mgr.unstableEntries[len(mgr.unstableEntries)-1].Index+1:
-		mgr.unstableEntries = append(mgr.unstableEntries, entries...)
-	case applyFirstIndex < mgr.unstableEntries[0].Index:
-		mgr.unstableEntries = entries
-	default:
-		mgr.unstableEntries = append([]message.Entry{}, mgr.unstableEntries[:applyFirstIndex+1]...)
-		mgr.unstableEntries = append(mgr.unstableEntries, entries...)
-	}
 }

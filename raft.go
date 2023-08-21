@@ -2,8 +2,12 @@ package lraft
 
 import (
 	"google.golang.org/protobuf/proto"
+	"lraft/entries"
 	"lraft/message"
 	"lraft/statem"
+	"lraft/storage"
+	"lraft/transport"
+	"lraft/utils"
 )
 
 var None int64 = -1
@@ -22,10 +26,6 @@ type role interface {
 	handleEvent(msgID message.MessageID, payload proto.Message)
 }
 
-type Transport interface {
-	Send(to int64, msgID message.MessageID, payload proto.Message)
-}
-
 type termInfo struct {
 	term   uint64
 	leader int64
@@ -37,31 +37,31 @@ type raft struct {
 	term     *termInfo
 	votedFor int64
 
-	log *logManager
+	entries *entries.Manager
 
 	// 各节点状态记录
 	peers     peersRecord
 	peerVotes map[int64]bool
 	// 状态机，记录角色状态切换，以及状态数据和状态内定时器的维护
 	stateMachine *statem.Machine
-	transporter  Transport
+	transporter  transport.Transporter
 }
 
-func newRaft(transporter Transport, storage Storage) *raft {
+func newRaft(transporter transport.Transporter, storage storage.Storage) *raft {
 	r := new(raft)
 	r.transporter = transporter
-	r.storage = storage
+	r.entries = entries.NewEntriesManager(storage)
 	r.stateMachine = statem.NewStateMachine(nil)
 	r.registerRoles()
 
 	// todo load from storage
-	term := 1
-	r.becomeFollower(term, None)
+	term := &termInfo{term: 1}
+	r.becomeFollower(term.term, None)
 	return r
 }
 
 func (r *raft) Tick() {
-	assert(r.stateMachine.Tick(), nil)
+	utils.Assert(r.stateMachine.Tick(), nil)
 }
 
 func (r *raft) HandleEvent(msgID message.MessageID, payload proto.Message) {
@@ -72,7 +72,7 @@ func (r *raft) state() *message.StorageState {
 	s := &message.StorageState{
 		Term:             r.term.term,
 		Vote:             r.votedFor,
-		LastAppliedIndex: r.log.lastApplied,
+		LastAppliedIndex: r.entries.LastIndex(),
 	}
 	return s
 }
@@ -83,9 +83,9 @@ func (r *raft) handleEventCommon(msgID message.MessageID, payload proto.Message)
 		request := payload.(*message.AppendEntriesReq)
 		success := true
 		switch {
-		case int(request.Term) > r.term.term:
-			r.becomeFollower(int(request.Term), request.LeaderID)
-		case int(request.Term) < r.term.term:
+		case request.Term > r.term.term:
+			r.becomeFollower(request.Term, request.LeaderID)
+		case request.Term < r.term.term:
 			success = false
 		case r.findEntry(int(request.PrevLogIndex)) == nil:
 			success = false
@@ -96,7 +96,7 @@ func (r *raft) handleEventCommon(msgID message.MessageID, payload proto.Message)
 
 		response := &message.AppendEntriesRes{Success: success}
 		if !success {
-			r.send(request.LeaderID, response)
+			r.send(request.LeaderID, message.MessageID_MsgAppendEntriesReq, response)
 			return
 		}
 
@@ -139,6 +139,15 @@ func (r *raft) broadcast(msgid message.MessageID, payload proto.Message) {
 	}
 }
 
+func (r *raft) foreach(except int64, f func(id int64, p *peerRecord)) {
+	for k, v := range r.peers {
+		if k == except {
+			continue
+		}
+		f(k, v)
+	}
+}
+
 func (r *raft) isUpToDate(lasti, term uint64) bool {
 	return term > l.lastTerm() || (term == l.lastTerm() && lasti >= l.lastIndex())
 }
@@ -156,19 +165,19 @@ func (r *raft) findTerm(index int) int {
 	return 0
 }
 
-func (r *raft) becomeFollower(term int, leader int64) {
-	assert(r.stateMachine.GotoState(StateFollower), nil)
+func (r *raft) becomeFollower(term uint64, leader int64) {
+	utils.assert(r.stateMachine.GotoState(StateFollower), nil)
 	r.term.term = term
 	r.term.leader = leader
 }
 
 func (r *raft) becomeCandidate() {
-	assert(r.stateMachine.GotoState(StateCandidate), nil)
+	utils.assert(r.stateMachine.GotoState(StateCandidate), nil)
 	r.term.term = r.term.term + 1
 }
 
 func (r *raft) becomeLeader() {
-	assert(r.stateMachine.GotoState(StateFollower), nil)
+	utils.assert(r.stateMachine.GotoState(StateFollower), nil)
 }
 
 type pollResult = int
