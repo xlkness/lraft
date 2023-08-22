@@ -1,7 +1,6 @@
 package lraft
 
 import (
-	"google.golang.org/protobuf/proto"
 	"lraft/message"
 	"lraft/statem"
 	"math/rand"
@@ -20,53 +19,82 @@ func (rf *raftFollower) exit(state *statem.StateData) {
 
 }
 
-func (rf *raftFollower) handleEvent(msgID message.MessageID, payload proto.Message) {
+func (rf *raftFollower) handleEvent(msg *message.Message) {
 	r := (*raft)(rf)
-	r.handleEventCommon(msgID, payload)
 
-	switch msgID {
+	switch msg.MsgID {
 	case message.MessageID_MsgAppendEntriesReq:
-		// 收到心跳，leader还活着，将超时选举定时器重置
-		rf.resetCanElectionTimer()
-
-		// 追加日志
-		request := payload.(*message.AppendEntriesReq)
-
-		reject := false
-		if request.Term < rf.term.term {
-			reject = true
-		} else if rf.entries.FindTerm(request.PrevLogIndex) != request.PrevLogTerm {
-			reject = true
-		}
-
-		if reject {
-			r.send(request.LeaderID, message.MessageID_MsgAppendEntriesRes, &message.AppendEntriesRes{
-				Success: reject,
+		if msg.Term < rf.term {
+			r.send(msg.From, message.Message{
+				MsgID:  message.MessageID_MsgAppendEntriesRes,
+				Reject: true,
 			})
 			return
 		}
 
-		if len(request.Entries) == 0 {
-			// 比对leader的应用索引，将进度追平
-			rf.entries.ApplyToIndex(r.state(), request.LeaderAppliedIndex)
-		} else {
-			// 追加条目
-			rf.entries.FollowerAppendEntries(request.PrevLogTerm, request.PrevLogIndex, request.Entries)
-		}
-		r.send(request.LeaderID, message.MessageID_MsgAppendEntriesRes, &message.AppendEntriesRes{
-			Success: true,
-		})
-	case message.MessageID_MsgRequestPreVoteReq, message.MessageID_MsgRequestVoteReq:
+		// 设置leader
+		rf.term = msg.Term
+		rf.leader = msg.From
+
+		// 收到心跳，leader还活着，将超时选举定时器重置
 		rf.resetCanElectionTimer()
 
-		request := payload.(*message.RequestVoteReq)
-		if rf.votedFor != None && rf.votedFor != request.CandidateID {
-			r.send(request.CandidateID, message.MessageID_MsgRequestPreVoteRes, &message.RequestVoteRes{VoteGranted: false})
-		} else if !rf.entries.IsUpToDate(request.LastLogIndex, request.LastLogTerm) {
-			r.send(request.CandidateID, message.MessageID_MsgRequestPreVoteRes, &message.RequestVoteRes{VoteGranted: false})
+		// 追加日志
+		reject := false
+		if rf.entries.FindTerm(msg.LastLogIndex) != msg.LastLogTerm {
+			reject = true
+		}
+
+		if reject {
+			r.send(msg.From, message.Message{
+				MsgID:  message.MessageID_MsgAppendEntriesRes,
+				Reject: true,
+			})
+			return
+		}
+
+		if len(msg.AppendEntriesReq.Entries) == 0 {
+			// 比对leader的应用索引，将进度追平
+			rf.entries.ApplyToIndex(r.state(), msg.LastLogIndex)
 		} else {
-			r.votedFor = request.CandidateID
-			r.send(request.CandidateID, message.MessageID_MsgRequestPreVoteRes, &message.RequestVoteRes{VoteGranted: true})
+			// 追加条目
+			rf.entries.FollowerAppendEntries(msg.LastLogTerm, msg.LastLogIndex, msg.AppendEntriesReq.Entries)
+		}
+		r.send(msg.From, message.Message{
+			MsgID:  message.MessageID_MsgAppendEntriesRes,
+			Reject: false,
+		})
+	case message.MessageID_MsgRequestPreVoteReq, message.MessageID_MsgRequestVoteReq:
+		resMsgID := message.MessageID_MsgRequestPreVoteRes
+		if msg.MsgID == message.MessageID_MsgRequestVoteReq {
+			resMsgID = message.MessageID_MsgRequestVoteRes
+		}
+		if msg.Term < rf.term {
+			r.send(msg.From, message.Message{
+				MsgID:  resMsgID,
+				Reject: true,
+			})
+			return
+		}
+
+		rf.resetCanElectionTimer()
+
+		if rf.votedFor != None && rf.votedFor != msg.From {
+			r.send(msg.From, message.Message{
+				MsgID:  resMsgID,
+				Reject: true,
+			})
+		} else if !rf.entries.IsUpToDate(msg.LastLogIndex, msg.LastLogTerm) {
+			r.send(msg.From, message.Message{
+				MsgID:  resMsgID,
+				Reject: true,
+			})
+		} else {
+			r.votedFor = msg.From
+			r.send(msg.From, message.Message{
+				MsgID:  resMsgID,
+				Reject: false,
+			})
 		}
 	}
 }

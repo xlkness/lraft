@@ -35,7 +35,11 @@ func (pr *peerRecord) goBack(reqAppendIndex, rejectedIndex uint64) (conflict boo
 type peersRecord map[int64]*peerRecord
 
 func (psr peersRecord) findPeer(id int64) *peerRecord {
-	return psr[id]
+	pr, find := psr[id]
+	if !find {
+		return &peerRecord{}
+	}
+	return pr
 }
 
 func (psr peersRecord) calcQuorumLogProgress() uint64 {

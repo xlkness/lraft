@@ -1,7 +1,6 @@
 package lraft
 
 import (
-	"google.golang.org/protobuf/proto"
 	"lraft/entries"
 	"lraft/message"
 	"lraft/statem"
@@ -23,7 +22,7 @@ const (
 type role interface {
 	become(stateData *statem.StateData)
 	exit(stateData *statem.StateData)
-	handleEvent(msgID message.MessageID, payload proto.Message)
+	handleEvent(msg *message.Message)
 }
 
 type termInfo struct {
@@ -34,7 +33,8 @@ type termInfo struct {
 type raft struct {
 	id int64
 
-	term     *termInfo
+	term     uint64
+	leader   int64
 	votedFor int64
 
 	entries *entries.Manager
@@ -54,8 +54,12 @@ func newRaft(transporter transport.Transporter, storage storage.Storage) *raft {
 	r.stateMachine = statem.NewStateMachine(nil)
 	r.registerRoles()
 
-	// todo load from storage
-	term := &termInfo{term: 1}
+	// load state from storage
+	state, err := storage.InitialState()
+	if err != nil {
+		panic(err)
+	}
+	term := &termInfo{term: state.Term}
 	r.becomeFollower(term.term, None)
 	return r
 }
@@ -64,78 +68,32 @@ func (r *raft) Tick() {
 	utils.Assert(r.stateMachine.Tick(), nil)
 }
 
-func (r *raft) HandleEvent(msgID message.MessageID, payload proto.Message) {
-	r.stateMachine.HandleEvent(msgID, payload)
+func (r *raft) HandleEvent(msg *message.Message) {
+	r.stateMachine.HandleEvent(msg)
 }
 
 func (r *raft) state() *message.StorageState {
 	s := &message.StorageState{
-		Term:             r.term.term,
-		Vote:             r.votedFor,
+		Term:             r.term,
 		LastAppliedIndex: r.entries.LastIndex(),
 	}
 	return s
 }
 
-func (r *raft) handleEventCommon(msgID message.MessageID, payload proto.Message) (isContinue bool) {
-	switch msgID {
-	case message.MessageID_MsgAppendEntriesReq:
-		request := payload.(*message.AppendEntriesReq)
-		success := true
-		switch {
-		case request.Term > r.term.term:
-			r.becomeFollower(request.Term, request.LeaderID)
-		case request.Term < r.term.term:
-			success = false
-		case r.findEntry(int(request.PrevLogIndex)) == nil:
-			success = false
-		case r.findTerm(int(request.PrevLogIndex)) != int(request.PrevLogTerm):
-			success = false
-			// todo 删除当前及以后的日志
-		}
-
-		response := &message.AppendEntriesRes{Success: success}
-		if !success {
-			r.send(request.LeaderID, message.MessageID_MsgAppendEntriesReq, response)
-			return
-		}
-
-		// todo 添加新条目
-		// 各个节点进度从大到小排序，取半数索引处的节点进度，直接追平到这个进度，表示集群半数认同的进度
-
-		if int(request.LeaderCommit) > r.commitIndex {
-			r.commitIndex = min(int(request.LeaderCommit), r.lastIndex())
-		}
-		r.send(request.LeaderID, response)
-	case message.MessageID_MsgRequestVoteReq:
-		request := payload.(*message.RequestVoteReq)
-		success := false
-		switch {
-		case int(request.Term) > r.term.term:
-			success = true
-			r.becomeFollower(int(request.Term), None)
-		case int(request.Term) >= r.term.term:
-			success = true
-		case r.votedFor == 0 && r.isUpToDate():
-			success = true
-		}
-
-		r.send(request.CandidateID, &message.RequestVoteRes{VoteGranted: success})
-	default:
-		return true
-	}
+func (r *raft) send(to int64, msg message.Message) {
+	msg.From = r.id
+	msg.To = to
+	msg.LastLogIndex = r.entries.LastIndex()
+	msg.LastLogTerm = r.entries.FindTerm(r.entries.LastIndex())
+	r.transporter.Send(to, &msg)
 }
 
-func (r *raft) send(to int64, msgid message.MessageID, payload proto.Message) {
-	r.transporter.Send(to, msgid, payload)
-}
-
-func (r *raft) broadcast(msgid message.MessageID, payload proto.Message) {
+func (r *raft) broadcast(msg message.Message) {
 	for k := range r.peers {
 		if k == r.id {
 			continue
 		}
-		r.send(k, msgid, payload)
+		r.send(k, msg)
 	}
 }
 
@@ -148,36 +106,19 @@ func (r *raft) foreach(except int64, f func(id int64, p *peerRecord)) {
 	}
 }
 
-func (r *raft) isUpToDate(lasti, term uint64) bool {
-	return term > l.lastTerm() || (term == l.lastTerm() && lasti >= l.lastIndex())
-}
-
-func (r *raft) findEntry(index int) *message.Entry {
-	return nil
-}
-
-func (r *raft) lastIndex() int {
-	return 0
-}
-
-func (r *raft) findTerm(index int) int {
-	// todo 从unstable以及stable storage中查找term
-	return 0
-}
-
 func (r *raft) becomeFollower(term uint64, leader int64) {
-	utils.assert(r.stateMachine.GotoState(StateFollower), nil)
-	r.term.term = term
-	r.term.leader = leader
+	utils.Assert(r.stateMachine.GotoState(StateFollower), nil)
+	r.term = term
+	r.leader = leader
 }
 
 func (r *raft) becomeCandidate() {
-	utils.assert(r.stateMachine.GotoState(StateCandidate), nil)
-	r.term.term = r.term.term + 1
+	utils.Assert(r.stateMachine.GotoState(StateCandidate), nil)
+	r.term = r.term + 1
 }
 
 func (r *raft) becomeLeader() {
-	utils.assert(r.stateMachine.GotoState(StateFollower), nil)
+	utils.Assert(r.stateMachine.GotoState(StateFollower), nil)
 }
 
 type pollResult = int
@@ -226,9 +167,9 @@ func (r *raft) registerRoles() {
 		{StateCandidate, (*raftCandidate)(r)},
 	}
 
-	stateList := make([]*statem.StateConf[*Event], 0, len(roleRegisterList))
+	stateList := make([]*statem.StateConf, 0, len(roleRegisterList))
 	for _, v := range roleRegisterList {
-		stateList = append(stateList, &statem.StateConf[*Event]{
+		stateList = append(stateList, &statem.StateConf{
 			Current:       v.state,
 			EntryCallback: v.become,
 			ExitCallback:  v.exit,

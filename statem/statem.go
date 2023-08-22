@@ -2,7 +2,6 @@ package statem
 
 import (
 	"fmt"
-	"google.golang.org/protobuf/proto"
 	"lraft/message"
 )
 
@@ -25,7 +24,7 @@ type StateConf struct {
 	// 离开当前状态执行的回调函数，为nil表示无
 	ExitCallback func(*StateData)
 	// 调用方自定义的消息处理方法，保持消息处理和状态一致，为nil表示无
-	HandleEvent func(msgID message.MessageID, payload proto.Message)
+	HandleEvent func(msg *message.Message)
 }
 
 type StateData struct {
@@ -96,13 +95,13 @@ func (m *Machine) Tick() error {
 	return nil
 }
 
-func (m *Machine) HandleEvent(msgID message.MessageID, payload proto.Message) {
+func (m *Machine) HandleEvent(msg *message.Message) {
 	curStateConf, find := m.states[m.curState.State]
 	if !find {
 		panic(m.curState.State)
 	}
 	if curStateConf.HandleEvent != nil {
-		curStateConf.HandleEvent(msgID, payload)
+		curStateConf.HandleEvent(msg)
 	}
 }
 
