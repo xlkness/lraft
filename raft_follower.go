@@ -1,22 +1,23 @@
 package lraft
 
 import (
+	"log"
 	"lraft/message"
 	"lraft/statem"
-	"math/rand"
+	"lraft/utils"
 )
 
 const followerCanElectionTimerKey = "election.timeout.timer"
-const followerCanElectionTimerTick = 2
 
 type raftFollower raft
 
 func (rf *raftFollower) become(state *statem.StateData) {
+	log.Printf("node[%v] become follower", rf.id)
 	rf.startCanElectionTimer()
 }
 
 func (rf *raftFollower) exit(state *statem.StateData) {
-
+	log.Printf("node[%v] exit follower", rf.id)
 }
 
 func (rf *raftFollower) handleEvent(msg *message.Message) {
@@ -24,6 +25,10 @@ func (rf *raftFollower) handleEvent(msg *message.Message) {
 
 	switch msg.MsgID {
 	case message.MessageID_MsgAppendEntriesReq:
+		if msg.Term == 0 {
+			r.send(rf.leader, *msg)
+			return
+		}
 		if msg.Term < rf.term {
 			r.send(msg.From, message.Message{
 				MsgID:  message.MessageID_MsgAppendEntriesRes,
@@ -32,20 +37,15 @@ func (rf *raftFollower) handleEvent(msg *message.Message) {
 			return
 		}
 
+		// 收到心跳，leader还活着，将超时选举定时器重置
+		rf.resetCanElectionTimer()
+
 		// 设置leader
 		rf.term = msg.Term
 		rf.leader = msg.From
 
-		// 收到心跳，leader还活着，将超时选举定时器重置
-		rf.resetCanElectionTimer()
-
 		// 追加日志
-		reject := false
 		if rf.entries.FindTerm(msg.LastLogIndex) != msg.LastLogTerm {
-			reject = true
-		}
-
-		if reject {
 			r.send(msg.From, message.Message{
 				MsgID:  message.MessageID_MsgAppendEntriesRes,
 				Reject: true,
@@ -54,7 +54,8 @@ func (rf *raftFollower) handleEvent(msg *message.Message) {
 		}
 
 		if len(msg.AppendEntriesReq.Entries) == 0 {
-			// 比对leader的应用索引，将进度追平
+			utils.Assert(msg.LastLogIndex > rf.entries.LastIndex(), true)
+			// 心跳消息，比对leader的应用索引，将进度追平
 			rf.entries.ApplyToIndex(r.state(), msg.LastLogIndex)
 		} else {
 			// 追加条目
@@ -101,12 +102,13 @@ func (rf *raftFollower) handleEvent(msg *message.Message) {
 
 func (rf *raftFollower) startCanElectionTimer() {
 	r := (*raft)(rf)
-	tick := followerCanElectionTimerTick + rand.Intn(followerCanElectionTimerTick)
+	tick := rf.config.CanElectionTimerTick + rf.rander.Intn(rf.config.CanElectionTimerTick)
 	r.stateMachine.InsertKeyValueTimeout(&statem.KVTimeout{
 		Key:         followerCanElectionTimerKey,
 		Value:       nil,
 		TimeoutTick: tick,
 		Callback: func(key, value any) {
+			log.Printf("start election")
 			// 超时发起选举
 			r.becomeCandidate()
 		},
@@ -114,6 +116,6 @@ func (rf *raftFollower) startCanElectionTimer() {
 }
 
 func (rf *raftFollower) resetCanElectionTimer() {
-	tick := followerCanElectionTimerTick + rand.Intn(followerCanElectionTimerTick)
+	tick := rf.config.CanElectionTimerTick + rf.rander.Intn(rf.config.CanElectionTimerTick)
 	rf.stateMachine.ResetKeValueTimer(followerCanElectionTimerKey, tick)
 }

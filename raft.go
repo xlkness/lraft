@@ -7,6 +7,9 @@ import (
 	"lraft/storage"
 	"lraft/transport"
 	"lraft/utils"
+	"math/rand"
+	"sort"
+	"time"
 )
 
 var None int64 = -1
@@ -19,19 +22,58 @@ const (
 	StateCandidate
 )
 
-type role interface {
-	become(stateData *statem.StateData)
-	exit(stateData *statem.StateData)
-	handleEvent(msg *message.Message)
+type peerRecord struct {
+	LogMatch uint64 // 已知复制到节点的最高日志条目号，初始为0
+	LogNext  uint64 // 发送给节点下一条日志条目索引号，一般为LogMatch+1，初始为leader最高索引号+1
 }
 
-type termInfo struct {
-	term   uint64
-	leader int64
+func (pr *peerRecord) goNext(index uint64) {
+	pr.LogMatch = max(pr.LogMatch, index)
+	pr.LogNext = max(pr.LogNext, index+1)
+}
+
+func (pr *peerRecord) goBack(reqAppendIndex, rejectedIndex uint64) (conflict bool) {
+	if pr.LogMatch != 0 {
+		if pr.LogMatch >= reqAppendIndex {
+			return false
+		}
+
+		pr.LogNext = pr.LogMatch + 1
+		return true
+	}
+
+	if pr.LogNext-1 != reqAppendIndex {
+		return false
+	}
+
+	pr.LogNext = min(reqAppendIndex, rejectedIndex+1, 1)
+	return true
+}
+
+type peersRecord map[int64]*peerRecord
+
+func (psr peersRecord) findPeer(id int64) *peerRecord {
+	pr, find := psr[id]
+	if !find {
+		return &peerRecord{}
+	}
+	return pr
+}
+
+func (psr peersRecord) calcQuorumLogProgress() uint64 {
+	progressList := make([]uint64, 0, len(psr))
+	for _, v := range psr {
+		progressList = append(progressList, v.LogMatch)
+	}
+	sort.SliceStable(progressList, func(i, j int) bool {
+		return progressList[i] > progressList[j]
+	})
+	return progressList[len(psr)/2]
 }
 
 type raft struct {
-	id int64
+	id     int64
+	config *Config
 
 	term     uint64
 	leader   int64
@@ -45,22 +87,32 @@ type raft struct {
 	// 状态机，记录角色状态切换，以及状态数据和状态内定时器的维护
 	stateMachine *statem.Machine
 	transporter  transport.Transporter
+	rander       *rand.Rand
 }
 
-func newRaft(transporter transport.Transporter, storage storage.Storage) *raft {
+func newRaft(id int64, peers []int64, transporter transport.Transporter, storage storage.Storage, config *Config) *raft {
 	r := new(raft)
+	r.id = id
+	r.config = config
 	r.transporter = transporter
 	r.entries = entries.NewEntriesManager(storage)
+	r.peers = make(peersRecord)
+	r.peerVotes = make(map[int64]bool)
 	r.stateMachine = statem.NewStateMachine(nil)
 	r.registerRoles()
+	r.rander = rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	for _, v := range peers {
+		r.peers[v] = &peerRecord{LogNext: 1}
+	}
 
 	// load state from storage
 	state, err := storage.InitialState()
 	if err != nil {
 		panic(err)
 	}
-	term := &termInfo{term: state.Term}
-	r.becomeFollower(term.term, None)
+
+	r.becomeFollower(state.Term, None)
 	return r
 }
 
@@ -114,11 +166,10 @@ func (r *raft) becomeFollower(term uint64, leader int64) {
 
 func (r *raft) becomeCandidate() {
 	utils.Assert(r.stateMachine.GotoState(StateCandidate), nil)
-	r.term = r.term + 1
 }
 
 func (r *raft) becomeLeader() {
-	utils.Assert(r.stateMachine.GotoState(StateFollower), nil)
+	utils.Assert(r.stateMachine.GotoState(StateLeader), nil)
 }
 
 type pollResult = int
@@ -155,6 +206,12 @@ func (r *raft) poll(id int64, vote bool) (granted, rejected int, result pollResu
 
 func (r *raft) quorum() int {
 	return len(r.peers)/2 + 1
+}
+
+type role interface {
+	become(stateData *statem.StateData)
+	exit(stateData *statem.StateData)
+	handleEvent(msg *message.Message)
 }
 
 func (r *raft) registerRoles() {

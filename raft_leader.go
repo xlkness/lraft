@@ -1,17 +1,20 @@
 package lraft
 
 import (
+	"log"
 	"lraft/message"
 	"lraft/statem"
 )
 
 const leaderBroadcastHeartBeatTimerKey = "broadcast.heartbeat"
-const leaderBroadcastHeartBeatTimerTick = 2
 
 type raftLeader raft
 
 func (rl *raftLeader) become(state *statem.StateData) {
+	log.Printf("node[%v] become leader", rl.id)
+
 	r := (*raft)(rl)
+	r.leader = r.id
 
 	// 给自己发一条空操作的日志，广播到集群
 	r.send(rl.id, message.Message{
@@ -32,7 +35,8 @@ func (rl *raftLeader) become(state *statem.StateData) {
 }
 
 func (rl *raftLeader) exit(state *statem.StateData) {
-
+	rl.leader = None
+	log.Printf("node[%v] exit candidate", rl.id)
 }
 
 func (rl *raftLeader) handleEvent(msg *message.Message) {
@@ -41,10 +45,17 @@ func (rl *raftLeader) handleEvent(msg *message.Message) {
 	switch msg.MsgID {
 	case message.MessageID_MsgAppendEntriesReq:
 		// 追加到本地记录
-		r.entries.LeaderAppendEntries(msg.AppendEntriesReq.Entries)
+		r.entries.LeaderAppendEntries(rl.term, msg.AppendEntriesReq.Entries)
+		// 给自己发个消息追加成功推进进度
+		r.send(rl.id, message.Message{
+			MsgID:  message.MessageID_MsgAppendEntriesRes,
+			Reject: false,
+			AppendEntriesRes: &message.AppendEntriesRes{
+				NeedAppendIndex: r.entries.LastIndex(),
+			},
+		})
 		// 广播本次条目进度
 		rl.broadcastAppend()
-		//r.broadcast(message.MessageID_MsgAppendEntriesReq, payload)
 	case message.MessageID_MsgAppendEntriesRes:
 		if !msg.Reject {
 			r.peers.findPeer(msg.From).goNext(msg.AppendEntriesRes.NeedAppendIndex)
@@ -60,7 +71,7 @@ func (rl *raftLeader) handleEvent(msg *message.Message) {
 			}
 		}
 	case message.MessageID_MsgRequestPreVoteRes:
-		_, _, result := r.poll(msg.From, msg.Reject)
+		_, _, result := r.poll(msg.From, !msg.Reject)
 		if result == pollResult_Win {
 			r.broadcast(message.Message{
 				MsgID: message.MessageID_MsgRequestVoteReq,
@@ -69,7 +80,7 @@ func (rl *raftLeader) handleEvent(msg *message.Message) {
 			r.becomeFollower(msg.Term, None)
 		}
 	case message.MessageID_MsgRequestVoteRes:
-		_, _, result := r.poll(msg.From, msg.Reject)
+		_, _, result := r.poll(msg.From, !msg.Reject)
 		if result == pollResult_Win {
 			r.becomeLeader()
 		} else if result == pollResult_Lose {
@@ -100,16 +111,25 @@ func (rl *raftLeader) sendAppend(to int64) {
 	(*raft)(rl).send(to, msg)
 }
 
+func (rl *raftLeader) broadcastHeartbeat() {
+	r := (*raft)(rl)
+	r.foreach(rl.id, func(id int64, record *peerRecord) {
+		lastApplied := min(record.LogMatch, rl.entries.LastIndex())
+		msg := message.Message{
+			MsgID:        message.MessageID_MsgAppendEntriesReq,
+			LastLogIndex: lastApplied,
+		}
+		r.send(id, msg)
+	})
+}
+
 func (rl *raftLeader) startBroadcastHeartbeatTimer() {
 	r := (*raft)(rl)
 	r.stateMachine.InsertKeyValueTimeout(&statem.KVTimeout{
 		Key:         leaderBroadcastHeartBeatTimerKey,
-		TimeoutTick: leaderBroadcastHeartBeatTimerTick,
+		TimeoutTick: rl.config.BroadcastHeartBeatTimerTick,
 		Callback: func(key, value any) {
-			msg := message.Message{
-				MsgID: message.MessageID_MsgAppendEntriesReq,
-			}
-			r.broadcast(msg)
+			rl.broadcastHeartbeat()
 			rl.startBroadcastHeartbeatTimer()
 		},
 	})

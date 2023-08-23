@@ -27,14 +27,25 @@ func (mgr *Manager) ApplyToIndex(state *message.StorageState, index uint64) {
 		return
 	}
 
-	err = mgr.stableStorage.ApplyTo(state, mgr.tempEntries[0:int(index-lastAppliedIndex)])
+	shouldApplyEntries := mgr.tempEntries[0:int(index-lastAppliedIndex)]
+	err = mgr.stableStorage.ApplyTo(state, shouldApplyEntries)
 	if err != nil {
 		panic(err)
 	}
+
+	mgr.tempEntries = mgr.tempEntries[int(index-lastAppliedIndex):]
 }
 
 func (mgr *Manager) FirstIndex() uint64 {
-	return 0
+	fi, _, err := mgr.stableStorage.FirstIndex()
+	if err != nil {
+		panic(err)
+	}
+	if fi <= 0 && len(mgr.tempEntries) > 0 {
+		return mgr.tempEntries[0].Index
+	}
+
+	return fi
 }
 
 func (mgr *Manager) LastIndex() uint64 {
@@ -99,13 +110,18 @@ func (mgr *Manager) FindTerm(index uint64) uint64 {
 	}
 
 	if !find {
-		return -1
+		return 0
 	}
 
 	return term
 }
 
-func (mgr *Manager) LeaderAppendEntries(entries []*message.Entry) {
+func (mgr *Manager) LeaderAppendEntries(term uint64, entries []*message.Entry) {
+	lastIndex := mgr.LastIndex()
+	for i, e := range entries {
+		e.Term = term
+		e.Index = lastIndex + 1 + uint64(i)
+	}
 	mgr.appendEntries(entries)
 }
 
@@ -116,15 +132,8 @@ func (mgr *Manager) FollowerAppendEntries(prevTerm, prevIndex uint64, entries []
 	if mgr.FindTerm(prevIndex) == prevTerm {
 		for i, entry := range entries {
 			if mgr.FindTerm(entry.Index) != entry.Term {
-
-				utils.Assert(entry.Index >= mgr.LastIndex(), true)
-
+				// 查找冲突的索引，一旦找到，后续的条目都可以追加
 				mgr.appendEntries(entries[i:])
-				//newLastIndex := entries[len(entries)-1].Index
-				err := mgr.stableStorage.ApplyTo(nil, entries[i:])
-				if err != nil {
-					panic(err)
-				}
 				break
 			}
 		}
@@ -137,12 +146,12 @@ func (mgr *Manager) appendEntries(entries []*message.Entry) {
 	}
 
 	lastAppliedIndex, _, err := mgr.stableStorage.LastIndex()
-	if err != nil {
-		panic(err)
-	}
+	utils.Assert(err, nil)
 
 	applyFirstIndex := entries[0].Index
-	utils.Assert(applyFirstIndex-1 < lastAppliedIndex, false)
+
+	// 只有临时条目可以被纠正，持久化的条目不能被纠正
+	utils.Assert(applyFirstIndex-1 >= lastAppliedIndex, true)
 
 	if len(mgr.tempEntries) == 0 {
 		mgr.tempEntries = append(mgr.tempEntries, entries...)
@@ -151,11 +160,14 @@ func (mgr *Manager) appendEntries(entries []*message.Entry) {
 
 	switch {
 	case applyFirstIndex == mgr.tempEntries[len(mgr.tempEntries)-1].Index+1:
+		// 第一个索引等于当前最后一个索引+1，表示有序
 		mgr.tempEntries = append(mgr.tempEntries, entries...)
 	case applyFirstIndex < mgr.tempEntries[0].Index:
+		// 第一个索引小于第0个临时条目索引，直接替换整个
 		mgr.tempEntries = entries
 	default:
-		mgr.tempEntries = append([]*message.Entry{}, mgr.tempEntries[:applyFirstIndex+1]...)
+		// 第一个索引处于临时条目之间，纠正
+		mgr.tempEntries = append([]*message.Entry{}, mgr.tempEntries[:applyFirstIndex-lastAppliedIndex-1]...)
 		mgr.tempEntries = append(mgr.tempEntries, entries...)
 	}
 }
