@@ -4,7 +4,6 @@ import (
 	"log"
 	"lraft/message"
 	"lraft/statem"
-	"lraft/utils"
 )
 
 const followerCanElectionTimerKey = "election.timeout.timer"
@@ -17,6 +16,7 @@ func (rf *raftFollower) become(state *statem.StateData) {
 }
 
 func (rf *raftFollower) exit(state *statem.StateData) {
+	(*raft)(rf).resetData()
 	log.Printf("node[%v] exit follower", rf.id)
 }
 
@@ -30,10 +30,7 @@ func (rf *raftFollower) handleEvent(msg *message.Message) {
 			return
 		}
 		if msg.Term < rf.term {
-			r.send(msg.From, message.Message{
-				MsgID:  message.MessageID_MsgAppendEntriesRes,
-				Reject: true,
-			})
+			// 忽略
 			return
 		}
 
@@ -44,22 +41,20 @@ func (rf *raftFollower) handleEvent(msg *message.Message) {
 		rf.term = msg.Term
 		rf.leader = msg.From
 
-		// 追加日志
-		if rf.entries.FindTerm(msg.LastLogIndex) != msg.LastLogTerm {
-			r.send(msg.From, message.Message{
-				MsgID:  message.MessageID_MsgAppendEntriesRes,
-				Reject: true,
-			})
-			return
-		}
-
-		if len(msg.AppendEntriesReq.Entries) == 0 {
-			utils.Assert(msg.LastLogIndex > rf.entries.LastIndex(), true)
+		if msg.AppendEntriesReq != nil && len(msg.AppendEntriesReq.Entries) != 0 {
+			// 追加条目
+			if lastIndex, ok := rf.entries.FollowerAppendEntries(msg.LastLogTerm, msg.LastLogIndex, msg.AppendEntriesReq.Entries); !ok {
+				log.Printf("node[%v] leader[%v] append entries to %v", rf.id, rf.leader, lastIndex)
+				r.send(msg.From, message.Message{
+					MsgID:            message.MessageID_MsgAppendEntriesRes,
+					Reject:           true,
+					AppendEntriesRes: &message.AppendEntriesRes{},
+				})
+				return
+			}
+		} else {
 			// 心跳消息，比对leader的应用索引，将进度追平
 			rf.entries.ApplyToIndex(r.state(), msg.LastLogIndex)
-		} else {
-			// 追加条目
-			rf.entries.FollowerAppendEntries(msg.LastLogTerm, msg.LastLogIndex, msg.AppendEntriesReq.Entries)
 		}
 		r.send(msg.From, message.Message{
 			MsgID:  message.MessageID_MsgAppendEntriesRes,
@@ -71,6 +66,7 @@ func (rf *raftFollower) handleEvent(msg *message.Message) {
 			resMsgID = message.MessageID_MsgRequestVoteRes
 		}
 		if msg.Term < rf.term {
+			log.Printf("%v reject for %v, term:%v,%v", r.id, msg.From, msg.Term, rf.term)
 			r.send(msg.From, message.Message{
 				MsgID:  resMsgID,
 				Reject: true,
@@ -81,11 +77,13 @@ func (rf *raftFollower) handleEvent(msg *message.Message) {
 		rf.resetCanElectionTimer()
 
 		if rf.votedFor != None && rf.votedFor != msg.From {
+			log.Printf("%v reject for %v, voted:%v,%v", r.id, msg.From, rf.votedFor, msg.From)
 			r.send(msg.From, message.Message{
 				MsgID:  resMsgID,
 				Reject: true,
 			})
 		} else if !rf.entries.IsUpToDate(msg.LastLogIndex, msg.LastLogTerm) {
+			log.Printf("%v reject for %v, up to date:%v,%v", r.id, msg.From, msg.LastLogIndex, msg.LastLogTerm)
 			r.send(msg.From, message.Message{
 				MsgID:  resMsgID,
 				Reject: true,
@@ -108,7 +106,7 @@ func (rf *raftFollower) startCanElectionTimer() {
 		Value:       nil,
 		TimeoutTick: tick,
 		Callback: func(key, value any) {
-			log.Printf("start election")
+			log.Printf("node[%v] start election", rf.id)
 			// 超时发起选举
 			r.becomeCandidate()
 		},

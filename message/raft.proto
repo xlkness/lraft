@@ -41,8 +41,6 @@ message AppendEntriesReq {
   repeated Entry Entries = 5;     // 存储的日志条目
 }
 message AppendEntriesRes {
-  uint64 NeedAppendIndex = 4;     //
-  uint64 RejectedIndex = 5;       // 拒绝的冲突索引，
 }
 
 message RequestVoteReq {

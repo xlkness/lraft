@@ -18,6 +18,7 @@ func (rc *raftCandidate) become(state *statem.StateData) {
 
 func (rc *raftCandidate) exit(state *statem.StateData) {
 	log.Printf("node[%v] exit candidate", rc.id)
+	(*raft)(rc).resetData()
 	rc.stopPreVoteTimeoutTimer()
 	rc.stopVoteTimeoutTimer()
 }

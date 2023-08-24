@@ -27,7 +27,7 @@ func (mgr *Manager) ApplyToIndex(state *message.StorageState, index uint64) {
 		return
 	}
 
-	shouldApplyEntries := mgr.tempEntries[0:int(index-lastAppliedIndex)]
+	shouldApplyEntries := mgr.tempEntries[:int(index-lastAppliedIndex)]
 	err = mgr.stableStorage.ApplyTo(state, shouldApplyEntries)
 	if err != nil {
 		panic(err)
@@ -61,9 +61,13 @@ func (mgr *Manager) LastIndex() uint64 {
 }
 
 func (mgr *Manager) Slice(low, high uint64) (entries []*message.Entry, snapshot storage.SnapshotReader) {
+
 	stableLastIndex, _, err := mgr.stableStorage.LastIndex()
 	if err != nil {
 		panic(err)
+	}
+	if low == 0 {
+		return nil, nil
 	}
 
 	if low <= stableLastIndex {
@@ -125,19 +129,22 @@ func (mgr *Manager) LeaderAppendEntries(term uint64, entries []*message.Entry) {
 	mgr.appendEntries(entries)
 }
 
-func (mgr *Manager) FollowerAppendEntries(prevTerm, prevIndex uint64, entries []*message.Entry) {
+func (mgr *Manager) FollowerAppendEntries(prevTerm, prevIndex uint64, entries []*message.Entry) (rejectedIndex uint64, ok bool) {
 	if len(entries) == 0 {
-		return
+		return mgr.LastIndex(), true
 	}
 	if mgr.FindTerm(prevIndex) == prevTerm {
 		for i, entry := range entries {
 			if mgr.FindTerm(entry.Index) != entry.Term {
 				// 查找冲突的索引，一旦找到，后续的条目都可以追加
 				mgr.appendEntries(entries[i:])
-				break
+				return mgr.LastIndex(), true
 			}
 		}
+		return
 	}
+
+	return mgr.LastIndex(), false
 }
 
 func (mgr *Manager) appendEntries(entries []*message.Entry) {

@@ -24,6 +24,10 @@ func newTestNode(id int64, peers []int64) (*transport.DebugTransporter, storage.
 }
 
 func multiNode() {
+	os.Remove("1.debug.entries")
+	os.Remove("2.debug.entries")
+	os.Remove("3.debug.entries")
+
 	tp1, _, n1 := newTestNode(1, []int64{1, 2, 3})
 	tp2, _, n2 := newTestNode(2, []int64{1, 2, 3})
 	tp3, _, n3 := newTestNode(3, []int64{1, 2, 3})
@@ -43,6 +47,14 @@ func multiNode() {
 	go n1.Start()
 	go n2.Start()
 	go n3.Start()
+
+	time.Sleep(time.Second * 2)
+
+	n3.Propose([]byte("set\na\n123"))
+	n3.Propose([]byte("set\nb\n234"))
+	n3.Propose([]byte("set\nb\n456"))
+
+	select {}
 }
 
 func singleNode() {
@@ -130,5 +142,6 @@ func singleNode() {
 }
 
 func TestRaft(t *testing.T) {
-	singleNode()
+	//singleNode()
+	multiNode()
 }

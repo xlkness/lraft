@@ -1,6 +1,7 @@
 package lraft
 
 import (
+	"log"
 	"lraft/entries"
 	"lraft/message"
 	"lraft/statem"
@@ -32,21 +33,12 @@ func (pr *peerRecord) goNext(index uint64) {
 	pr.LogNext = max(pr.LogNext, index+1)
 }
 
-func (pr *peerRecord) goBack(reqAppendIndex, rejectedIndex uint64) (conflict bool) {
+func (pr *peerRecord) goBack() (conflict bool) {
 	if pr.LogMatch != 0 {
-		if pr.LogMatch >= reqAppendIndex {
-			return false
-		}
-
 		pr.LogNext = pr.LogMatch + 1
 		return true
 	}
-
-	if pr.LogNext-1 != reqAppendIndex {
-		return false
-	}
-
-	pr.LogNext = min(reqAppendIndex, rejectedIndex+1, 1)
+	pr.LogNext -= 1
 	return true
 }
 
@@ -69,6 +61,13 @@ func (psr peersRecord) calcQuorumLogProgress() uint64 {
 		return progressList[i] > progressList[j]
 	})
 	return progressList[len(psr)/2]
+}
+
+func (psr peersRecord) resetProgress(last uint64) {
+	for _, v := range psr {
+		v.LogNext = last
+		v.LogMatch = 0
+	}
 }
 
 type raft struct {
@@ -101,6 +100,7 @@ func newRaft(id int64, peers []int64, transporter transport.Transporter, storage
 	r.stateMachine = statem.NewStateMachine(nil)
 	r.registerRoles()
 	r.rander = rand.New(rand.NewSource(time.Now().UnixNano()))
+	r.resetData()
 
 	for _, v := range peers {
 		r.peers[v] = &peerRecord{LogNext: 1}
@@ -121,6 +121,7 @@ func (r *raft) Tick() {
 }
 
 func (r *raft) HandleEvent(msg *message.Message) {
+	log.Printf("node[%v] leader[%v] receive msg:%v", r.id, r.leader, msg.String())
 	r.stateMachine.HandleEvent(msg)
 }
 
@@ -132,7 +133,13 @@ func (r *raft) state() *message.StorageState {
 	return s
 }
 
+func (r *raft) resetData() {
+	r.leader = None
+	r.votedFor = None
+}
+
 func (r *raft) send(to int64, msg message.Message) {
+	msg.Term = r.term
 	msg.From = r.id
 	msg.To = to
 	msg.LastLogIndex = r.entries.LastIndex()
