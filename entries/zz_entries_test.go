@@ -22,9 +22,9 @@ var entries = []*message.Entry{
 
 func testLeaderEntries() {
 	os.Remove("debug.entries")
-	st := storage.NewDebugMemoryStorage()
+	st := storage.NewDebugMemoryStorage(1)
 	em := NewEntriesManager(st)
-	em.LeaderAppendEntries(entries)
+	em.LeaderAppendEntries(1, entries)
 	assert(em.LastIndex(), uint64(9))
 	assert(em.FirstIndex(), uint64(1))
 	assert(em.FindTerm(3), uint64(6))
@@ -47,9 +47,9 @@ func testLeaderEntries() {
 
 func testLeaderEntries1() {
 	os.Remove("debug.entries")
-	st := storage.NewDebugMemoryStorage()
+	st := storage.NewDebugMemoryStorage(1)
 	em := NewEntriesManager(st)
-	em.LeaderAppendEntries(entries)
+	em.LeaderAppendEntries(1, entries)
 	assert(em.LastIndex(), uint64(9))
 	assert(em.FirstIndex(), uint64(1))
 	assert(em.FindTerm(3), uint64(6))
@@ -72,7 +72,7 @@ func testLeaderEntries1() {
 
 func testAppend() {
 	os.Remove("debug.entries")
-	st := storage.NewDebugMemoryStorage()
+	st := storage.NewDebugMemoryStorage(1)
 	em := NewEntriesManager(st)
 	em.appendEntries(entries)
 
@@ -112,7 +112,7 @@ func testAppend() {
 
 func testFollowerEntries() {
 	os.Remove("debug.entries")
-	st := storage.NewDebugMemoryStorage()
+	st := storage.NewDebugMemoryStorage(1)
 	em := NewEntriesManager(st)
 	em.FollowerAppendEntries(0, 0, entries)
 	assert(em.LastIndex(), uint64(9))
